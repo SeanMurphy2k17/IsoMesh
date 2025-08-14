@@ -52,11 +52,29 @@ namespace IsoMesh
         private float m_subsurfaceScatteringPower;
         public float SubsurfaceScatteringPower => m_subsurfaceScatteringPower;
 
+        // Layered material support for splatmapping
+        [SerializeField]
+        private Texture2D[] m_layerTextures;
+        public Texture2D[] LayerTextures => m_layerTextures;
+
+        [SerializeField]
+        private Vector2[] m_layerScales;
+        public Vector2[] LayerScales => m_layerScales;
+
+        [SerializeField]
+        private RenderTexture m_splatMap;
+        public RenderTexture SplatMap => m_splatMap;
+
+        [SerializeField]
+        private Vector2 m_worldBounds;
+        public Vector2 WorldBounds => m_worldBounds;
+
         public enum MaterialType
         {
             None,
             Colour,
-            Texture
+            Texture,
+            Layered
         }
 
         public SDFMaterial(Color mainCol, Color emission, float metallic, float smoothness, Color subsurfaceColour, float subsurfaceScatteringPower, float materialSmoothing)
@@ -70,6 +88,31 @@ namespace IsoMesh
             m_subsurfaceColour = subsurfaceColour;
             m_subsurfaceScatteringPower = subsurfaceScatteringPower;
             m_materialSmoothing = materialSmoothing;
+            
+            // Initialize layered material fields
+            m_layerTextures = null;
+            m_layerScales = null;
+            m_splatMap = null;
+            m_worldBounds = Vector2.one * 100f;
+        }
+
+        // Constructor for layered materials
+        public SDFMaterial(Texture2D[] layerTextures, Vector2[] layerScales, RenderTexture splatMap, Vector2 worldBounds, float materialSmoothing)
+        {
+            m_type = MaterialType.Layered;
+            m_texture = default;
+            m_colour = Color.white;
+            m_emission = Color.black;
+            m_metallic = 0f;
+            m_smoothness = 0.5f;
+            m_subsurfaceColour = Color.white;
+            m_subsurfaceScatteringPower = 1f;
+            m_materialSmoothing = materialSmoothing;
+            
+            m_layerTextures = layerTextures;
+            m_layerScales = layerScales;
+            m_splatMap = splatMap;
+            m_worldBounds = worldBounds;
         }
     }
 
@@ -101,6 +144,21 @@ namespace IsoMesh
             Thickness = 0f;
             SubsurfaceColour = (Vector4)material.SubsurfaceColour;
             SubsurfaceScatteringPower = material.SubsurfaceScatteringPower;//Mathf.Lerp(5f, 0f, material.SubsurfaceScatteringPower);
+            MaterialSmoothing = material.MaterialSmoothing;
+        }
+        
+        // Constructor for layered materials
+        public SDFMaterialGPU(SDFMaterial material, int textureArrayIndex)
+        {
+            MaterialType = (int)material.Type;
+            TextureIndex = textureArrayIndex;
+            Colour = (Vector4)material.Colour;
+            Emission = (Vector4)material.Emission;
+            Metallic = Mathf.Clamp01(material.Metallic);
+            Smoothness = Mathf.Clamp01(material.Smoothness);
+            Thickness = 0f;
+            SubsurfaceColour = (Vector4)material.SubsurfaceColour;
+            SubsurfaceScatteringPower = material.SubsurfaceScatteringPower;
             MaterialSmoothing = material.MaterialSmoothing;
         }
     }
