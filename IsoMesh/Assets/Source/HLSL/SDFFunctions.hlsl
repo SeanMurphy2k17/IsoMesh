@@ -149,6 +149,106 @@ float2 sdf_uv_sphere(float3 p, float radius)
     return float2(rotatiness, normalizedHeight);
 }
 
+// SUPER SIMPLE PLANAR UV PROJECTIONS - Perfect for terrain!
+float2 sdf_uv_world_xz(float3 worldPos, float tileSize)
+{
+    // Simple XZ plane projection (top-down view)
+    return worldPos.xz / tileSize;
+}
+
+float2 sdf_uv_world_xy(float3 worldPos, float tileSize)
+{
+    // Front-facing projection 
+    return worldPos.xy / tileSize;
+}
+
+float2 sdf_uv_world_yz(float3 worldPos, float tileSize)
+{
+    // Side-facing projection
+    return worldPos.yz / tileSize;
+}
+
+float2 sdf_uv_local_xz(float3 localPos, float tileSize)
+{
+    // Local space XZ projection (relative to object)
+    return localPos.xz / tileSize;
+}
+
+// ADAPTIVE NORMAL-BASED PROJECTION - picks best plane based on surface normal!
+float2 sdf_uv_adaptive_planar(float3 localPos, float3 normal, float tileSize)
+{
+    // Find the dominant axis of the normal
+    float3 absNormal = abs(normal);
+    
+    // Project onto the plane most aligned with the surface normal
+    if (absNormal.y > absNormal.x && absNormal.y > absNormal.z)
+    {
+        // Y is dominant - use XZ plane (top/bottom faces)
+        return localPos.xz / tileSize;
+    }
+    else if (absNormal.x > absNormal.z)
+    {
+        // X is dominant - use YZ plane (left/right faces)
+        return localPos.yz / tileSize;
+    }
+    else
+    {
+        // Z is dominant - use XY plane (front/back faces)
+        return localPos.xy / tileSize;
+    }
+}
+
+// TRIPLANAR WITH NORMAL WEIGHTING - blends all three projections based on normal
+float2 sdf_uv_smart_triplanar(float3 localPos, float3 normal, float tileSize)
+{
+    // Calculate all three projections
+    float2 yzPlane = localPos.yz / tileSize;  // X-facing surfaces
+    float2 xzPlane = localPos.xz / tileSize;  // Y-facing surfaces  
+    float2 xyPlane = localPos.xy / tileSize;  // Z-facing surfaces
+    
+    // Use normal to weight the projections
+    float3 blendWeights = abs(normal);
+    blendWeights = blendWeights / (blendWeights.x + blendWeights.y + blendWeights.z);
+    
+    return yzPlane * blendWeights.x + xzPlane * blendWeights.y + xyPlane * blendWeights.z;
+}
+
+// ULTRA SIMPLE UV PROJECTION - guaranteed to work, might have seams but no skewing!
+float2 sdf_uv_ultra_simple(float3 localPos, float tileSize)
+{
+    // Just use XZ coordinates, super simple
+    return localPos.xz / tileSize;
+}
+
+// VOXEL-BASED UVs - Use the SDF voxel grid coordinates directly as UVs (GENIUS!)
+float2 sdf_uv_voxel_based(float3 worldPos, float cellSize, int samplesPerSide)
+{
+    // Convert world position back to voxel grid coordinates
+    float gridBounds = ((float)samplesPerSide - 1.0) * cellSize * 0.5;
+    float3 normalizedGridPos = (worldPos + gridBounds) / (gridBounds * 2.0); // [0,1] range
+    
+    // Use XZ plane of the voxel grid as UV coordinates
+    return normalizedGridPos.xz; // Perfect 0-1 UV coordinates from the grid!
+}
+
+// LAZY GRID-BASED UVs - Use voxel grid coordinates as UVs (ZERO math, guaranteed to work!)
+float2 sdf_uv_grid_based(float3 worldPos, float gridSize, float uvScale)
+{
+    // Convert world position to normalized grid coordinates [0,1]
+    float3 gridPos = (worldPos + gridSize * 0.5) / gridSize; // Center around origin
+    return gridPos.xz * uvScale; // Use XZ plane of grid as UV
+}
+
+// DISTANCE-BASED UVs - Use distance from origin (great for radial patterns!)
+float2 sdf_uv_distance_based(float3 localPos, float scale)
+{
+    float dist = length(localPos.xz);
+    float angle = atan2(localPos.z, localPos.x) / (2.0 * 3.14159) + 0.5; // Normalize to [0,1]
+    return float2(angle, dist / scale);
+}
+
+// Note: For world-space UVs, transform the object instead of the UVs!
+
 // polynomial smooth min (k = 0.1);
 float sdf_op_smin(float a, float b, float k)
 {

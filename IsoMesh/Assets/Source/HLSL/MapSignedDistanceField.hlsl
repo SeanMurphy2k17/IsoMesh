@@ -1,6 +1,8 @@
 #ifndef COMPUTE_MAP_INCLUDED
 #define COMPUTE_MAP_INCLUDED
 
+// Note: _CellSize and _PointsPerSide are already defined in the main compute shader
+
 #define PRIMITIVE_TYPE_SPHERE 1
 #define PRIMITIVE_TYPE_TORUS 2
 #define PRIMITIVE_TYPE_CUBOID 3
@@ -311,16 +313,23 @@ float2 sdf_uv(float3 p, SDFGPUData data, out float dist)
         {
             case PRIMITIVE_TYPE_SPHERE:
                 dist = sdf_sphere(p, data.Data.x) * data.Flip;
-                return sdf_uv_sphere(p, data.Data.x);
+                // Use simple fallback UVs for now (works everywhere)
+                return sdf_uv_ultra_simple(p, 3.0);
             case PRIMITIVE_TYPE_TORUS:
                 dist = sdf_torus(p, data.Data.xy) * data.Flip;
                 return sdf_uv_sphere(p, data.Data.x);
             case PRIMITIVE_TYPE_CUBOID:
                 dist = sdf_roundedBox(p, data.Data.xyz, data.Data.w) * data.Flip;
+                // Simple triplanar projection (works everywhere)
                 return sdf_uv_triplanar(p, data.Data.xyz, sdf_box_normal(p, data.Data.xyz));
+            case PRIMITIVE_TYPE_CYLINDER:
+                dist = sdf_cylinder(p, data.Data.x, data.Data.y) * data.Flip;
+                // Simple XZ projection for cylinders
+                return sdf_uv_ultra_simple(p, 3.0);
             default:
                 dist = sdf_boxFrame(p, data.Data.xyz, data.Data.w) * data.Flip;
-                return sdf_uv_triplanar(p, data.Data.xyz, sdf_box_normal(p, data.Data.xyz));
+                // Simple distance-based UVs for box frames
+                return sdf_uv_distance_based(p, 5.0);
         }
     }
 }

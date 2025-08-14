@@ -16,7 +16,7 @@ namespace IsoMesh
     /// or transfered to the CPU and sent to a MeshFilter in 'Mesh' mode.
     /// </summary>
     [ExecuteInEditMode]
-    public class SDFGroupMeshGenerator : MonoBehaviour, ISDFGroupComponent
+    public class SDFGroupMeshGenerator : MonoBehaviour, ISDFGroupComponent 
     {
         #region Fields and Properties
 
@@ -50,7 +50,7 @@ namespace IsoMesh
             public static readonly int MeshVertices_RWBuffer = Shader.PropertyToID("_MeshVertices");
             public static readonly int MeshNormals_RWBuffer = Shader.PropertyToID("_MeshNormals");
             public static readonly int MeshTriangles_RWBuffer = Shader.PropertyToID("_MeshTriangles");
-            //public static readonly int MeshUVs_RWBuffer = Shader.PropertyToID("_MeshUVs");
+            //public static readonly int MeshUVs_RWBuffer = Shader.PropertyToID("_MeshUVs"); // PACKED INTO VERTEX COLORS
             public static readonly int MeshVertexColours_RWBuffer = Shader.PropertyToID("_MeshVertexColours");
             public static readonly int MeshVertexMaterials_RWBuffer = Shader.PropertyToID("_MeshVertexMaterials");
 
@@ -110,7 +110,7 @@ namespace IsoMesh
         private ComputeBuffer m_meshVerticesBuffer;
         private ComputeBuffer m_meshNormalsBuffer;
         private ComputeBuffer m_meshTrianglesBuffer;
-        //private ComputeBuffer m_meshUVsBuffer;
+        //private ComputeBuffer m_meshUVsBuffer; // PACKED INTO VERTEX COLORS
         private ComputeBuffer m_meshVertexMaterialsBuffer;
         private ComputeBuffer m_meshVertexColoursBuffer;
         private ComputeBuffer m_intermediateVertexBuffer;
@@ -119,7 +119,7 @@ namespace IsoMesh
 
         private NativeArray<Vector3> m_nativeArrayVertices;
         private NativeArray<Vector3> m_nativeArrayNormals;
-        //private NativeArray<Vector2> m_nativeArrayUVs;
+        //private NativeArray<Vector2> m_nativeArrayUVs; // PACKED INTO VERTEX COLORS
         private NativeArray<Color> m_nativeArrayColours;
         private NativeArray<int> m_nativeArrayTriangles;
 
@@ -145,6 +145,20 @@ namespace IsoMesh
                     Debug.Log("Successfully loaded.");
 
                 return m_computeShader;
+            }
+        }
+        
+        private const string UVComputeShaderResourceName = "Compute_UVGeneration";
+        private ComputeShader m_uvComputeShader;
+        private ComputeShader UVComputeShader
+        {
+            get
+            {
+                if (m_uvComputeShader)
+                    return m_uvComputeShader;
+                    
+                m_uvComputeShader = Resources.Load<ComputeShader>(UVComputeShaderResourceName);
+                return m_uvComputeShader;
             }
         }
 
@@ -265,6 +279,10 @@ namespace IsoMesh
         [SerializeField]
         private bool m_showGrid = false;
         public bool ShowGrid => m_showGrid;
+        
+        [SerializeField]
+        private bool m_showUVDebug = false;
+        public bool ShowUVDebug => m_showUVDebug;
 
         private bool m_isEnabled = false;
 
@@ -314,6 +332,379 @@ namespace IsoMesh
             }
         }
 
+        #endregion
+
+        #region UV Generation
+        
+        private enum UVGenerationMode { Simple, VoxelBased, LocalSpace, Triplanar, Spherical, TBN, TriplanarSeamless }
+        
+        private class UVGenerationResult
+        {
+            public NativeArray<Vector2> uvs;
+            public int originalVertexCount;
+            public int duplicateCount = 0;
+            public bool needsMeshRebuild = false;
+            
+            // For seamless triplanar implementation
+            public Vector3[] expandedVertices;
+            public Vector3[] expandedNormals;
+            public Vector2[] expandedUVs;
+            public int[] remappedTriangles;
+            
+            public int TotalVertexCount => originalVertexCount + duplicateCount;
+            
+            public void Dispose()
+            {
+                if (uvs.IsCreated) uvs.Dispose();
+                // expandedVertices, expandedNormals, expandedUVs, and remappedTriangles are regular arrays - no disposal needed
+            }
+        }
+        [SerializeField]
+        private UVGenerationMode m_uvMode = UVGenerationMode.Triplanar;
+        
+        [SerializeField]
+        [Range(0.1f, 10.0f)]
+        private float m_uvScale = 1.0f;
+        
+        [SerializeField]
+        [Range(0, 3)]
+        private int m_debugUVMode = 0; // 0=off, 1=face selection, 2=UV coordinates, 3=blend weights
+        
+        [SerializeField]
+        [Range(1.0f, 8.0f)]
+        private float m_triplanarBlendSharpness = 2.0f;
+        
+        private UVGenerationResult GenerateUVsComputeShader(NativeArray<Vector3> vertices, NativeArray<Vector3> normals, NativeArray<int> triangles, int vertexCount, int triangleCount)
+        {
+            var result = new UVGenerationResult();
+            result.originalVertexCount = vertexCount;
+            
+            // Ensure UV compute shader is loaded
+            if (UVComputeShader == null)
+            {
+                Debug.LogError("UV Generation compute shader not found! Falling back to simple UVs.");
+                result.uvs = new NativeArray<Vector2>(vertexCount, Allocator.Temp);
+                for (int i = 0; i < vertexCount; i++)
+                    result.uvs[i] = new Vector2(vertices[i].x * 0.1f, vertices[i].z * 0.1f);
+                return result;
+            }
+            
+            // Create buffers
+            var vertexBuffer = new ComputeBuffer(vertexCount, sizeof(float) * 3);
+            var normalBuffer = new ComputeBuffer(vertexCount, sizeof(float) * 3);
+            var uvBuffer = new ComputeBuffer(vertexCount, sizeof(float) * 2);
+            
+            // Upload mesh data - only the exact vertex count we need
+            var vertexArray = new Vector3[vertexCount];
+            var normalArray = new Vector3[vertexCount];
+            
+            for (int i = 0; i < vertexCount; i++)
+            {
+                vertexArray[i] = vertices[i];
+                normalArray[i] = normals[i];
+            }
+            
+            vertexBuffer.SetData(vertexArray);
+            normalBuffer.SetData(normalArray);
+            
+            // Select kernel based on mode
+            int kernel = 0;
+            switch (m_uvMode)
+            {
+                case UVGenerationMode.Simple:
+                    kernel = UVComputeShader.FindKernel("GenerateUVs");
+                    break;
+                case UVGenerationMode.VoxelBased:
+                    kernel = UVComputeShader.FindKernel("GenerateUVsVoxelBased");
+                    break;
+                case UVGenerationMode.LocalSpace:
+                    kernel = UVComputeShader.FindKernel("GenerateUVsLocalSpace");
+                    break;
+                case UVGenerationMode.Triplanar:
+                    kernel = UVComputeShader.FindKernel("GenerateUVsTriplanar");
+                    break;
+                case UVGenerationMode.Spherical:
+                    kernel = UVComputeShader.FindKernel("GenerateUVsSpherical");
+                    break;
+                case UVGenerationMode.TBN:
+                    kernel = UVComputeShader.FindKernel("GenerateUVsTBN");
+                    break;
+                case UVGenerationMode.TriplanarSeamless:
+                    // Multi-pass seamless triplanar requires special handling
+                    return GenerateSeamlessTriplanarUVs(vertices, normals, triangles, vertexCount, triangleCount, 
+                                                      vertexBuffer, normalBuffer);
+            }
+            
+            // Set compute shader parameters
+            UVComputeShader.SetBuffer(kernel, "_MeshVertices", vertexBuffer);
+            UVComputeShader.SetBuffer(kernel, "_MeshNormals", normalBuffer);
+            UVComputeShader.SetBuffer(kernel, "_GeneratedUVs", uvBuffer);
+            UVComputeShader.SetInt("_VertexCount", vertexCount);
+            UVComputeShader.SetFloat("_UVScale", m_uvScale);
+            // Match the transform used in mesh generation - vertices are in mesh local space
+            if (TryGetOrCreateMeshGameObject(out GameObject meshGameObject))
+                UVComputeShader.SetMatrix("_MeshTransform", meshGameObject.transform.worldToLocalMatrix);
+            else
+                UVComputeShader.SetMatrix("_MeshTransform", Matrix4x4.identity);
+            UVComputeShader.SetFloat("_CellSize", m_voxelSettings.CellSize);
+            UVComputeShader.SetInt("_PointsPerSide", m_voxelSettings.SamplesPerSide);
+            UVComputeShader.SetInt("_DebugMode", m_debugUVMode);
+            UVComputeShader.SetFloat("_BlendSharpness", m_triplanarBlendSharpness);
+            
+            // Dispatch compute shader
+            int threadGroups = Mathf.CeilToInt(vertexCount / 64.0f);
+            UVComputeShader.Dispatch(kernel, threadGroups, 1, 1);
+            
+            // Read back UVs
+            var tempUVArray = new Vector2[vertexCount];
+            uvBuffer.GetData(tempUVArray);
+            result.uvs = new NativeArray<Vector2>(vertexCount, Allocator.Temp);
+            result.uvs.CopyFrom(tempUVArray);
+            
+            // Cleanup
+            vertexBuffer.Dispose();
+            normalBuffer.Dispose();
+            uvBuffer.Dispose();
+            
+            return result;
+        }
+        
+        private UVGenerationResult GenerateSeamlessTriplanarUVs(NativeArray<Vector3> vertices, NativeArray<Vector3> normals, 
+                                                                   NativeArray<int> triangles, int vertexCount, int triangleCount,
+                                                                   ComputeBuffer vertexBuffer, ComputeBuffer normalBuffer)
+        {
+            var result = new UVGenerationResult();
+            result.originalVertexCount = vertexCount;
+            // Create all necessary buffers for multi-pass processing
+            var triangleBuffer = new ComputeBuffer(triangleCount * 3, sizeof(int));
+            var projectionMaskBuffer = new ComputeBuffer(vertexCount, sizeof(int));
+            var duplicateCountBuffer = new ComputeBuffer(vertexCount, sizeof(int));
+            var duplicateOffsetBuffer = new ComputeBuffer(vertexCount, sizeof(int));
+            var totalDuplicatesBuffer = new ComputeBuffer(1, sizeof(int));
+            
+            // Initialize buffers - only copy the exact triangle data we need
+            // Ensure we don't read beyond the triangles array bounds
+            int triangleDataSize = Mathf.Min(triangleCount * 3, triangles.Length);
+            var triangleArray = new int[triangleDataSize];
+            for (int i = 0; i < triangleDataSize; i++)
+                triangleArray[i] = triangles[i];
+                
+            // If the data is smaller than expected, pad with zeros
+            if (triangleDataSize < triangleCount * 3)
+            {
+                Debug.LogWarning($"[UV] Triangle data size mismatch: expected {triangleCount * 3}, got {triangleDataSize}");
+                // Create properly sized array
+                var paddedArray = new int[triangleCount * 3];
+                System.Array.Copy(triangleArray, paddedArray, triangleDataSize);
+                triangleBuffer.SetData(paddedArray);
+            }
+            else
+            {
+                triangleBuffer.SetData(triangleArray);
+            }
+            
+            // Clear projection masks and counters
+            var clearArray = new int[vertexCount];
+            projectionMaskBuffer.SetData(clearArray);
+            duplicateCountBuffer.SetData(clearArray);
+            duplicateOffsetBuffer.SetData(clearArray);
+            totalDuplicatesBuffer.SetData(new int[] { 0 });
+            
+            // Common parameters for all passes
+            if (TryGetOrCreateMeshGameObject(out GameObject meshGameObject))
+                UVComputeShader.SetMatrix("_MeshTransform", meshGameObject.transform.worldToLocalMatrix);
+            else
+                UVComputeShader.SetMatrix("_MeshTransform", Matrix4x4.identity);
+            UVComputeShader.SetFloat("_UVScale", m_uvScale);
+            UVComputeShader.SetInt("_VertexCount", vertexCount);
+            UVComputeShader.SetInt("_TriangleCount", triangleCount);
+            
+            // PASS 1: Analyze vertex projections
+            int kernel = UVComputeShader.FindKernel("AnalyzeVertexProjections");
+            UVComputeShader.SetBuffer(kernel, "_MeshVertices", vertexBuffer);
+            UVComputeShader.SetBuffer(kernel, "_MeshTriangles", triangleBuffer);
+            UVComputeShader.SetBuffer(kernel, "_VertexProjectionMask", projectionMaskBuffer);
+            int threadGroups = Mathf.CeilToInt(triangleCount / 64.0f);
+            UVComputeShader.Dispatch(kernel, threadGroups, 1, 1);
+            
+            // PASS 2: Count duplicates needed
+            kernel = UVComputeShader.FindKernel("CountDuplicatesNeeded");
+            UVComputeShader.SetBuffer(kernel, "_VertexProjectionMask", projectionMaskBuffer);
+            UVComputeShader.SetBuffer(kernel, "_VertexDuplicateCount", duplicateCountBuffer);
+            UVComputeShader.SetBuffer(kernel, "_VertexDuplicateOffset", duplicateOffsetBuffer);
+            UVComputeShader.SetBuffer(kernel, "_TotalDuplicatesCounter", totalDuplicatesBuffer);
+            threadGroups = Mathf.CeilToInt(vertexCount / 64.0f);
+            UVComputeShader.Dispatch(kernel, threadGroups, 1, 1);
+            
+            // Read back total duplicates needed
+            var totalDuplicates = new int[1];
+            totalDuplicatesBuffer.GetData(totalDuplicates);
+            int duplicateCount = totalDuplicates[0];
+            
+            // Debug logging
+            Debug.Log($"[UV] Seamless Triplanar Analysis:");
+            Debug.Log($"[UV] - Original vertices: {vertexCount}");
+            Debug.Log($"[UV] - Duplicates needed: {duplicateCount}");
+            Debug.Log($"[UV] - Total vertices after duplication: {vertexCount + duplicateCount}");
+            
+            // Store duplicate info in result
+            result.duplicateCount = duplicateCount;
+            result.needsMeshRebuild = duplicateCount > 0;
+            
+            // Create buffers for duplicates (only if needed)
+            ComputeBuffer duplicateVertexDataBuffer = null;
+            ComputeBuffer remappedTriangleBuffer = null;
+            
+            if (duplicateCount > 0)
+            {
+                // Packed structure size: float3 + float3 + float2 + int + int = 12 + 12 + 8 + 4 + 4 = 40 bytes
+                duplicateVertexDataBuffer = new ComputeBuffer(duplicateCount, 40);
+                remappedTriangleBuffer = new ComputeBuffer(triangleCount * 3, sizeof(int));
+            }
+            
+            // Create UV buffer for all vertices (original + duplicates)
+            var totalVertexCount = vertexCount + duplicateCount;
+            var uvBuffer = new ComputeBuffer(totalVertexCount, sizeof(float) * 2);
+            
+            // PASS 3A: Generate UVs for original vertices
+            kernel = UVComputeShader.FindKernel("GenerateOriginalVertexUVs");
+            UVComputeShader.SetBuffer(kernel, "_MeshVertices", vertexBuffer);
+            UVComputeShader.SetBuffer(kernel, "_VertexProjectionMask", projectionMaskBuffer);
+            UVComputeShader.SetBuffer(kernel, "_GeneratedUVs", uvBuffer);
+            threadGroups = Mathf.CeilToInt(vertexCount / 64.0f);
+            UVComputeShader.Dispatch(kernel, threadGroups, 1, 1);
+            
+            // PASS 3B: Create duplicate vertices (only if needed)
+            if (duplicateCount > 0)
+            {
+                kernel = UVComputeShader.FindKernel("CreateDuplicateVertices");
+                UVComputeShader.SetBuffer(kernel, "_MeshVertices", vertexBuffer);
+                UVComputeShader.SetBuffer(kernel, "_MeshNormals", normalBuffer);
+                UVComputeShader.SetBuffer(kernel, "_VertexProjectionMask", projectionMaskBuffer);
+                UVComputeShader.SetBuffer(kernel, "_VertexDuplicateCount", duplicateCountBuffer);
+                UVComputeShader.SetBuffer(kernel, "_VertexDuplicateOffset", duplicateOffsetBuffer);
+                UVComputeShader.SetBuffer(kernel, "_DuplicateVertexData", duplicateVertexDataBuffer);
+                threadGroups = Mathf.CeilToInt(vertexCount / 64.0f);
+                UVComputeShader.Dispatch(kernel, threadGroups, 1, 1);
+            }
+            
+            // If we have duplicates, we need to update the mesh
+            if (duplicateCount > 0)
+            {
+                // PASS 4: Remap triangle indices
+                kernel = UVComputeShader.FindKernel("RemapTriangleIndices");
+                UVComputeShader.SetBuffer(kernel, "_MeshVertices", vertexBuffer);
+                UVComputeShader.SetBuffer(kernel, "_MeshTriangles", triangleBuffer);
+                UVComputeShader.SetBuffer(kernel, "_VertexProjectionMask", projectionMaskBuffer);
+                UVComputeShader.SetBuffer(kernel, "_VertexDuplicateCount", duplicateCountBuffer);
+                UVComputeShader.SetBuffer(kernel, "_VertexDuplicateOffset", duplicateOffsetBuffer);
+                UVComputeShader.SetBuffer(kernel, "_DuplicateVertexData", duplicateVertexDataBuffer);
+                UVComputeShader.SetBuffer(kernel, "_RemappedTriangles", remappedTriangleBuffer);
+                threadGroups = Mathf.CeilToInt(triangleCount / 64.0f);
+                UVComputeShader.Dispatch(kernel, threadGroups, 1, 1);
+                
+                // TODO: Update the actual mesh with new vertices and remapped triangles
+                // This would require modifying the mesh after UV generation
+                Debug.LogWarning($"Seamless triplanar created {duplicateCount} duplicate vertices for UV seams. Full mesh update not yet implemented.");
+            }
+            
+            // For now, just return the original vertex UVs
+            // In a full implementation, we'd need to rebuild the entire mesh
+            var tempUVArray = new Vector2[vertexCount];
+            uvBuffer.GetData(tempUVArray, 0, 0, vertexCount);
+            result.uvs = new NativeArray<Vector2>(vertexCount, Allocator.Temp);
+            result.uvs.CopyFrom(tempUVArray);
+            
+            // Step 5: If we have duplicates, read back and create expanded mesh data
+            if (duplicateCount > 0)
+            {
+                Debug.Log($"[UV] Reading expanded mesh data from GPU...");
+                
+                // Read original UVs
+                var originalUVs = new Vector2[vertexCount];
+                uvBuffer.GetData(originalUVs);
+                
+                // Read duplicate vertex data as raw floats (matching HLSL struct layout)
+                // DuplicateVertexData: float3 vertex, float3 normal, float2 uv, int sourceIndex, int projection
+                // = 3 + 3 + 2 + 1 + 1 = 10 floats per duplicate
+                var duplicateDataFloats = new float[duplicateCount * 10];
+                duplicateVertexDataBuffer.GetData(duplicateDataFloats);
+                
+                // Read remapped triangles
+                var remappedTriangles = new int[triangleCount * 3];
+                remappedTriangleBuffer.GetData(remappedTriangles);
+                
+                // Create expanded arrays
+                int expandedVertexCount = vertexCount + duplicateCount;
+                result.expandedVertices = new Vector3[expandedVertexCount];
+                result.expandedNormals = new Vector3[expandedVertexCount];
+                result.expandedUVs = new Vector2[expandedVertexCount];
+                result.remappedTriangles = remappedTriangles;
+                result.duplicateCount = duplicateCount;
+                result.needsMeshRebuild = true;
+                
+                // Copy original vertices
+                var verticesArray = new Vector3[vertexCount];
+                var normalsArray = new Vector3[vertexCount];
+                vertexBuffer.GetData(verticesArray);
+                normalBuffer.GetData(normalsArray);
+                
+                for (int i = 0; i < vertexCount; i++)
+                {
+                    result.expandedVertices[i] = verticesArray[i];
+                    result.expandedNormals[i] = normalsArray[i];
+                    result.expandedUVs[i] = originalUVs[i];
+                }
+                
+                // Parse and add duplicate vertices
+                for (int i = 0; i < duplicateCount; i++)
+                {
+                    int baseIndex = i * 10;
+                    int destIndex = vertexCount + i;
+                    
+                    // Extract data from float array
+                    result.expandedVertices[destIndex] = new Vector3(
+                        duplicateDataFloats[baseIndex + 0],
+                        duplicateDataFloats[baseIndex + 1],
+                        duplicateDataFloats[baseIndex + 2]
+                    );
+                    result.expandedNormals[destIndex] = new Vector3(
+                        duplicateDataFloats[baseIndex + 3],
+                        duplicateDataFloats[baseIndex + 4],
+                        duplicateDataFloats[baseIndex + 5]
+                    );
+                    result.expandedUVs[destIndex] = new Vector2(
+                        duplicateDataFloats[baseIndex + 6],
+                        duplicateDataFloats[baseIndex + 7]
+                    );
+                    // sourceIndex at baseIndex + 8 (not needed for mesh creation)
+                    // projection at baseIndex + 9 (not needed for mesh creation)
+                }
+                
+                Debug.Log($"[UV] Seamless Triplanar Complete:");
+                Debug.Log($"[UV] - Original vertices: {vertexCount}");
+                Debug.Log($"[UV] - Duplicate vertices: {duplicateCount}");
+                Debug.Log($"[UV] - Total vertices: {expandedVertexCount}");
+                Debug.Log($"[UV] - Triangles: {triangleCount}");
+            }
+            
+            // Cleanup
+            triangleBuffer.Release();
+            projectionMaskBuffer.Release();
+            duplicateCountBuffer.Release();
+            duplicateOffsetBuffer.Release();
+            totalDuplicatesBuffer.Release();
+            uvBuffer.Release();
+            
+            if (duplicateCount > 0)
+            {
+                duplicateVertexDataBuffer?.Release();
+                remappedTriangleBuffer?.Release();
+            }
+            
+            return result;
+        }
+        
         #endregion
 
         #region Mesh Stuff
@@ -386,7 +777,7 @@ namespace IsoMesh
 
             ReallocateArrayIfNeeded(ref vertices, vertexCount);
             ReallocateArrayIfNeeded(ref normals, vertexCount);
-            //ReallocateArrayIfNeeded(ref uvs, vertexCount);
+            //ReallocateArrayIfNeeded(ref m_nativeArrayUVs, vertexCount); // PACKED INTO VERTEX COLORS
             ReallocateArrayIfNeeded(ref colours, vertexCount);
             ReallocateArrayIfNeeded(ref indices, triangleCount * 3);
         }
@@ -425,7 +816,7 @@ namespace IsoMesh
 
                 AsyncGPUReadbackRequest vertexRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayVertices, m_meshVerticesBuffer, vertexRequestSize * sizeof(float) * 3, 0);
                 AsyncGPUReadbackRequest normalRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayNormals, m_meshNormalsBuffer, vertexRequestSize * sizeof(float) * 3, 0);
-                //AsyncGPUReadbackRequest uvRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayUVs, m_meshUVsBuffer, vertexRequestSize * sizeof(float) * 2, 0);
+                //AsyncGPUReadbackRequest uvRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayUVs, m_meshUVsBuffer, vertexRequestSize * sizeof(float) * 2, 0); // PACKED INTO VERTEX COLORS
                 AsyncGPUReadbackRequest colourRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayColours, m_meshVertexColoursBuffer, vertexRequestSize * sizeof(float) * 4, 0);
                 AsyncGPUReadbackRequest triangleRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayTriangles, m_meshTrianglesBuffer, triangleRequestSize * sizeof(int), 0);
 
@@ -443,7 +834,7 @@ namespace IsoMesh
                     return;
                 }
 
-                SetMeshData(m_nativeArrayVertices, m_nativeArrayNormals/*, m_nativeArrayUVs*/, m_nativeArrayColours, m_nativeArrayTriangles, vertexCount, triangleCount);
+                SetMeshData(m_nativeArrayVertices, m_nativeArrayNormals, m_nativeArrayColours, m_nativeArrayTriangles, vertexCount, triangleCount);
             }
             else
             {
@@ -488,14 +879,14 @@ namespace IsoMesh
 
                 AsyncGPUReadbackRequest vertexRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayVertices, m_meshVerticesBuffer, vertexRequestSize * sizeof(float) * 3, 0);
                 AsyncGPUReadbackRequest normalRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayNormals, m_meshNormalsBuffer, vertexRequestSize * sizeof(float) * 3, 0);
-                //AsyncGPUReadbackRequest uvRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayUVs, m_meshUVsBuffer, vertexRequestSize * sizeof(float) * 2, 0);
+                //AsyncGPUReadbackRequest uvRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayUVs, m_meshUVsBuffer, vertexRequestSize * sizeof(float) * 2, 0); // PACKED INTO VERTEX COLORS
                 AsyncGPUReadbackRequest colourRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayColours, m_meshVertexColoursBuffer, vertexRequestSize * sizeof(float) * 4, 0);
                 AsyncGPUReadbackRequest triangleRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayTriangles, m_meshTrianglesBuffer, triangleRequestSize * sizeof(int), 0);
 
-                while (!vertexRequest.done && !normalRequest.done && !colourRequest.done/*!uvRequest.done*/ && !triangleRequest.done)
+                while (!vertexRequest.done && !normalRequest.done && !colourRequest.done && !triangleRequest.done)
                     yield return null;
 
-                SetMeshData(m_nativeArrayVertices, m_nativeArrayNormals, m_nativeArrayColours/*m_nativeArrayUVs*/, m_nativeArrayTriangles, vertexCount, triangleCount);
+                SetMeshData(m_nativeArrayVertices, m_nativeArrayNormals, m_nativeArrayColours, m_nativeArrayTriangles, vertexCount, triangleCount);
             }
             else
             {
@@ -509,7 +900,7 @@ namespace IsoMesh
             m_isCoroutineRunning = false;
         }
 
-        private void SetMeshData(NativeArray<Vector3> vertices, NativeArray<Vector3> normals/*, NativeArray<Vector2> uvs*/, NativeArray<Color> colours, NativeArray<int> indices, int vertexCount, int triangleCount)
+        private void SetMeshData(NativeArray<Vector3> vertices, NativeArray<Vector3> normals, NativeArray<Color> colours, NativeArray<int> indices, int vertexCount, int triangleCount)
         {
             if (MeshRenderer)
                 MeshRenderer.enabled = true;
@@ -531,9 +922,127 @@ namespace IsoMesh
 
             m_mesh.SetVertices(vertices, 0, vertexCount);
             m_mesh.SetNormals(normals, 0, vertexCount);
-            //m_mesh.SetUVs(0, uvs, 0, vertexCount);
-            m_mesh.SetColors(colours, 0, vertexCount);
+            
+            // Generate UVs using second compute shader pass
+            var uvResult = GenerateUVsComputeShader(vertices, normals, indices, vertexCount, triangleCount);
+            
+            // Now vertex colors are just material colors
+            var cleanColors = new NativeArray<Color>(vertexCount, Allocator.Temp);
+            
+            // Check if mesh rebuild is needed for seamless UVs
+            if (uvResult.needsMeshRebuild)
+            {
+                Debug.LogWarning($"[UV] Mesh needs {uvResult.duplicateCount} duplicate vertices for seamless UVs. Full implementation pending.");
+                
+                // Step 7: Simple test case - double all vertices when debug mode = 3
+                if (m_debugUVMode == 3)
+                {
+                    Debug.Log($"[UV] TEST MODE: Doubling all vertices to test expanded mesh handling");
+                    
+                    // Create expanded arrays with double the vertices
+                    var testVertexCount = vertexCount * 2;
+                    var testVertices = new NativeArray<Vector3>(testVertexCount, Allocator.Temp);
+                    var testNormals = new NativeArray<Vector3>(testVertexCount, Allocator.Temp);
+                    var testUVs = new NativeArray<Vector2>(testVertexCount, Allocator.Temp);
+                    var testColors = new NativeArray<Color>(testVertexCount, Allocator.Temp);
+                    
+                    // Copy original vertices twice
+                    for (int i = 0; i < vertexCount; i++)
+                    {
+                        testVertices[i] = vertices[i];
+                        testVertices[vertexCount + i] = vertices[i];
+                        testNormals[i] = normals[i];
+                        testNormals[vertexCount + i] = normals[i];
+                        testUVs[i] = uvResult.uvs[i];
+                        testUVs[vertexCount + i] = uvResult.uvs[i];
+                        testColors[i] = colours[i];
+                        testColors[vertexCount + i] = colours[i];
+                    }
+                    
+                    // Use the test data
+                    m_mesh.SetVertices(testVertices, 0, testVertexCount);
+                    m_mesh.SetNormals(testNormals, 0, testVertexCount);
+                    m_mesh.SetUVs(0, testUVs, 0, testVertexCount);
+                    m_mesh.SetColors(testColors, 0, testVertexCount);
+                    
+                    // Cleanup test arrays
+                    testVertices.Dispose();
+                    testNormals.Dispose();
+                    testUVs.Dispose();
+                    testColors.Dispose();
+                    
+                    Debug.Log($"[UV] TEST MODE: Successfully created mesh with {testVertexCount} vertices (doubled from {vertexCount})");
+                    
+                    // Skip normal UV processing
+                    uvResult.Dispose();
+                    cleanColors.Dispose();
+                    m_mesh.SetIndices(indices, 0, triangleCount * 3, MeshTopology.Triangles, 0, calculateBounds: true);
+                    MeshFilter.mesh = m_mesh;
+                    if (MeshCollider) MeshCollider.sharedMesh = m_mesh;
+                    return;
+                }
+                
+                // Implement full mesh rebuild with expanded vertices from seamless triplanar
+                if (uvResult.expandedVertices != null && uvResult.expandedNormals != null && 
+                    uvResult.expandedUVs != null && uvResult.remappedTriangles != null)
+                {
+                    Debug.Log($"[UV] SEAMLESS MODE: Rebuilding mesh with {uvResult.expandedVertices.Length} vertices (expanded from {vertexCount})");
+                    
+                    int expandedVertexCount = uvResult.expandedVertices.Length;
+                    
+                    // Create expanded color array
+                    var expandedColors = new Color[expandedVertexCount];
+                    
+                    // Copy original colors for original vertices
+                    for (int i = 0; i < vertexCount; i++)
+                    {
+                        expandedColors[i] = colours[i];
+                    }
+                    
+                    // For duplicate vertices, use the same color as their source vertex
+                    // (We could enhance this to extract source index from GPU data if needed)
+                    for (int i = vertexCount; i < expandedVertexCount; i++)
+                    {
+                        // For now, use a default color or interpolate
+                        expandedColors[i] = Color.white;
+                    }
+                    
+                    // Set the expanded mesh data
+                    m_mesh.SetVertices(uvResult.expandedVertices);
+                    m_mesh.SetNormals(uvResult.expandedNormals);
+                    m_mesh.SetUVs(0, uvResult.expandedUVs);
+                    m_mesh.SetColors(expandedColors);
+                    
+                    // Use the remapped triangles
+                    m_mesh.SetIndices(uvResult.remappedTriangles, MeshTopology.Triangles, 0, calculateBounds: true);
+                    
+                    Debug.Log($"[UV] SEAMLESS MODE: Successfully created seamless mesh with {expandedVertexCount} vertices");
+                    
+                    // Cleanup and return early
+                    uvResult.Dispose();
+                    cleanColors.Dispose();
+                    MeshFilter.mesh = m_mesh;
+                    if (MeshCollider) MeshCollider.sharedMesh = m_mesh;
+                    return;
+                }
+            }
+            
+            // Fill vertex colors
+            for (int i = 0; i < vertexCount; i++)
+            {
+                cleanColors[i] = colours[i]; // Direct material colors
+                
+                // DEBUG: Visualize UVs as colors
+                if (m_showUVDebug)
+                    cleanColors[i] = new Color(uvResult.uvs[i].x, uvResult.uvs[i].y, 0, 1);
+            }
+            
+            m_mesh.SetUVs(0, uvResult.uvs, 0, vertexCount);
+            m_mesh.SetColors(cleanColors, 0, vertexCount);
             m_mesh.SetIndices(indices, 0, triangleCount * 3, MeshTopology.Triangles, 0, calculateBounds: true);
+            
+            uvResult.Dispose();
+            cleanColors.Dispose();
 
             MeshFilter.mesh = m_mesh;
 
@@ -656,7 +1165,7 @@ namespace IsoMesh
             m_meshVerticesBuffer?.Dispose();
             m_meshNormalsBuffer?.Dispose();
             m_meshTrianglesBuffer?.Dispose();
-            //m_meshUVsBuffer?.Dispose();
+            //m_meshUVsBuffer?.Dispose(); // PACKED INTO VERTEX COLORS
             m_meshVertexColoursBuffer?.Dispose();
             m_meshVertexMaterialsBuffer?.Dispose();
 
@@ -670,7 +1179,7 @@ namespace IsoMesh
             m_meshVerticesBuffer = new ComputeBuffer(countCubed * 3, sizeof(float) * 3, ComputeBufferType.Structured);
             m_meshNormalsBuffer = new ComputeBuffer(countCubed * 3, sizeof(float) * 3, ComputeBufferType.Structured);
             m_meshTrianglesBuffer = new ComputeBuffer(countCubed * 3, sizeof(int), ComputeBufferType.Structured);
-            //m_meshUVsBuffer = new ComputeBuffer(countCubed * 3, sizeof(float) * 2, ComputeBufferType.Structured);
+            //m_meshUVsBuffer = new ComputeBuffer(countCubed * 3, sizeof(float) * 2, ComputeBufferType.Structured); // PACKED INTO VERTEX COLORS
             m_meshVertexColoursBuffer = new ComputeBuffer(countCubed * 3, sizeof(float) * 4, ComputeBufferType.Structured);
             m_meshVertexMaterialsBuffer = new ComputeBuffer(countCubed * 3, SDFMaterialGPU.Stride, ComputeBufferType.Structured);
 
@@ -684,7 +1193,7 @@ namespace IsoMesh
                 m_propertyBlock.SetBuffer(Properties.MeshVertices_RWBuffer, m_meshVerticesBuffer);
                 m_propertyBlock.SetBuffer(Properties.MeshTriangles_RWBuffer, m_meshTrianglesBuffer);
                 m_propertyBlock.SetBuffer(Properties.MeshNormals_RWBuffer, m_meshNormalsBuffer);
-                //m_propertyBlock.SetBuffer(Properties.MeshUVs_RWBuffer, m_meshUVsBuffer);
+                //m_propertyBlock.SetBuffer(Properties.MeshUVs_RWBuffer, m_meshUVsBuffer); // PACKED INTO VERTEX COLORS
                 m_propertyBlock.SetBuffer(Properties.MeshVertexMaterials_RWBuffer, m_meshVertexMaterialsBuffer);
             }
 
@@ -697,7 +1206,7 @@ namespace IsoMesh
             m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, Properties.MeshVertices_RWBuffer, m_meshVerticesBuffer);
             m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, Properties.MeshNormals_RWBuffer, m_meshNormalsBuffer);
             m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, Properties.MeshTriangles_RWBuffer, m_meshTrianglesBuffer);
-            //m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, Properties.MeshUVs_RWBuffer, m_meshUVsBuffer);
+            //m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, Properties.MeshUVs_RWBuffer, m_meshUVsBuffer); // PACKED INTO VERTEX COLORS
             m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, Properties.MeshVertexMaterials_RWBuffer, m_meshVertexMaterialsBuffer);
 
             m_computeShaderInstance.SetBuffer(m_kernels.BuildIndexBuffer, Properties.MeshTriangles_RWBuffer, m_meshTrianglesBuffer);
@@ -709,7 +1218,7 @@ namespace IsoMesh
             m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.MeshNormals_RWBuffer, m_meshNormalsBuffer);
             m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.MeshTriangles_RWBuffer, m_meshTrianglesBuffer);
             m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.MeshVertexMaterials_RWBuffer, m_meshVertexMaterialsBuffer);
-            //m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.MeshUVs_RWBuffer, m_meshUVsBuffer);
+            //m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.MeshUVs_RWBuffer, m_meshUVsBuffer); // PACKED INTO VERTEX COLORS
             m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.IntermediateVertexBuffer_StructuredBuffer, m_intermediateVertexBuffer);
             m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, Properties.MeshVertexColours_RWBuffer, m_meshVertexColoursBuffer);
 
@@ -739,7 +1248,7 @@ namespace IsoMesh
             m_meshVerticesBuffer?.Dispose();
             m_meshNormalsBuffer?.Dispose();
             m_meshTrianglesBuffer?.Dispose();
-            //m_meshUVsBuffer?.Dispose();
+            //m_meshUVsBuffer?.Dispose(); // PACKED INTO VERTEX COLORS
             m_meshVertexColoursBuffer?.Dispose();
             m_meshVertexMaterialsBuffer?.Dispose();
 
@@ -758,7 +1267,7 @@ namespace IsoMesh
                 m_nativeArrayNormals.Dispose();
 
             //if (m_nativeArrayUVs != null && m_nativeArrayUVs.IsCreated)
-            //    m_nativeArrayUVs.Dispose();
+            //    m_nativeArrayUVs.Dispose(); // PACKED INTO VERTEX COLORS
 
             if (m_nativeArrayColours != null && m_nativeArrayColours.IsCreated)
                 m_nativeArrayColours.Dispose();
@@ -789,6 +1298,8 @@ namespace IsoMesh
             m_computeShaderInstance.SetBuffer(m_kernels.Map, id, buffer);
             m_computeShaderInstance.SetBuffer(m_kernels.GenerateVertices, id, buffer);
             m_computeShaderInstance.SetBuffer(m_kernels.GenerateTriangles, id, buffer);
+            m_computeShaderInstance.SetBuffer(m_kernels.BuildIndexBuffer, id, buffer);
+            m_computeShaderInstance.SetBuffer(m_kernels.AddIntermediateVerticesToIndexBuffer, id, buffer);
         }
 
         /// <summary>

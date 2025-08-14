@@ -37,6 +37,14 @@ namespace IsoMesh.Editor
             public static GUIContent NudgeMaxMagnitude = new GUIContent("Nudge Max", "Limits the magnitude of the nudge vector. (See above.)");
             public static GUIContent DebugSettings = new GUIContent("Debug Settings", "Controls for gizmos.");
             public static GUIContent ShowGrid = new GUIContent("Show Grid", "Show the voxel grid as a gizmo. Not recommended for high voxel counts.");
+            public static GUIContent ShowUVDebug = new GUIContent("Show UV Debug", "Visualize UVs as vertex colors.");
+            
+            // UV Generation labels
+            public static GUIContent UVSettings = new GUIContent("UV Generation", "Settings for UV coordinate generation.");
+            public static GUIContent UVMode = new GUIContent("UV Mode", "Method for generating UV coordinates.");
+            public static GUIContent UVScale = new GUIContent("UV Scale", "Scale factor for UV coordinates.");
+            public static GUIContent DebugUVMode = new GUIContent("Debug UV Mode", "0=Off, 1=Show face selection, 2=Show UV coordinates, 3=Show blend weights");
+            public static GUIContent TriplanarBlendSharpness = new GUIContent("Triplanar Blend", "Controls blend sharpness (1=smooth, 8=sharp). Lower values reduce seams but may cause distortion.");
 
             public static string SettingsControlledByGridWarning = "The settings for this script are controlled externally, by a ChunkGrid component.";
         }
@@ -73,8 +81,15 @@ namespace IsoMesh.Editor
             //public SerializedProperty NudgeMaxMagnitude { get; }
 
             public SerializedProperty ShowGrid { get; }
+            public SerializedProperty ShowUVDebug { get; }
 
             public SerializedProperty SettingsControlledByGrid { get; }
+            
+            // UV Generation properties
+            public SerializedProperty UVMode { get; }
+            public SerializedProperty UVScale { get; }
+            public SerializedProperty DebugUVMode { get; }
+            public SerializedProperty TriplanarBlendSharpness { get; }
 
             public SerializedProperties(SerializedObject serializedObject)
             {
@@ -110,8 +125,15 @@ namespace IsoMesh.Editor
                 CellDensity = VoxelSettings.FindPropertyRelative("m_cellDensity");
 
                 ShowGrid = serializedObject.FindProperty("m_showGrid");
+                ShowUVDebug = serializedObject.FindProperty("m_showUVDebug");
 
                 SettingsControlledByGrid = serializedObject.FindProperty("m_settingsControlledByGrid");
+                
+                // UV Generation properties
+                UVMode = serializedObject.FindProperty("m_uvMode");
+                UVScale = serializedObject.FindProperty("m_uvScale");
+                DebugUVMode = serializedObject.FindProperty("m_debugUVMode");
+                TriplanarBlendSharpness = serializedObject.FindProperty("m_triplanarBlendSharpness");
             }
         }
         
@@ -122,6 +144,7 @@ namespace IsoMesh.Editor
         private bool m_isVoxelSettingsOpen = true;
         private bool m_isAlgorithmSettingsOpen = true;
         private bool m_isDebugSettingsOpen = true;
+        private bool m_isUVSettingsOpen = true;
 
         private void OnEnable()
         {
@@ -233,6 +256,32 @@ namespace IsoMesh.Editor
                     using (EditorGUI.IndentLevelScope indent = new EditorGUI.IndentLevelScope())
                     {
                         m_setter.DrawProperty(Labels.ShowGrid, m_serializedProperties.ShowGrid);
+                        m_setter.DrawProperty(Labels.ShowUVDebug, m_serializedProperties.ShowUVDebug);
+                    }
+                }
+            }
+            
+            // UV Generation Settings
+            if (m_isUVSettingsOpen = EditorGUILayout.Foldout(m_isUVSettingsOpen, Labels.UVSettings, true))
+            {
+                using (EditorGUILayout.VerticalScope box = new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                {
+                    using (EditorGUI.IndentLevelScope indent = new EditorGUI.IndentLevelScope())
+                    {
+                        m_setter.DrawProperty(Labels.UVMode, m_serializedProperties.UVMode);
+                        m_setter.DrawProperty(Labels.UVScale, m_serializedProperties.UVScale);
+                        // Show blend sharpness for both Triplanar modes
+                        if (m_serializedProperties.UVMode.enumValueIndex == 3 || // Triplanar
+                            m_serializedProperties.UVMode.enumValueIndex == 6)   // TriplanarSeamless
+                        {
+                            m_setter.DrawProperty(Labels.TriplanarBlendSharpness, m_serializedProperties.TriplanarBlendSharpness);
+                        }
+                        
+                        if (m_serializedProperties.UVMode.enumValueIndex == 6) // TriplanarSeamless
+                        {
+                            EditorGUILayout.HelpBox("Seamless Triplanar duplicates vertices at UV seams for perfect texture continuity. This increases vertex count but eliminates all UV seams.", MessageType.Info);
+                        }
+                        m_setter.DrawProperty(Labels.DebugUVMode, m_serializedProperties.DebugUVMode);
                     }
                 }
             }

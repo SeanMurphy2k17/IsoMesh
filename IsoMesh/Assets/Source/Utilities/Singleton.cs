@@ -12,7 +12,7 @@ public class Singleton<T> : MonoBehaviour where T : Singleton<T>
         {
             if (instance == null && !m_triedToFind)
             {
-                instance = (T)FindObjectOfType(typeof(T));
+                instance = (T)FindFirstObjectByType(typeof(T), FindObjectsInactive.Exclude);
 
                 if (instance == null)
                 {
