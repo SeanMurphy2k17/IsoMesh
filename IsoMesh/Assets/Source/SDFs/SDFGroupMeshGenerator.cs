@@ -350,6 +350,7 @@ namespace IsoMesh
             public Vector3[] expandedNormals;
             public Vector2[] expandedUVs;
             public int[] remappedTriangles;
+            public int[] duplicateSourceIndices;  // Source vertex index for each duplicate
             
             public int TotalVertexCount => originalVertexCount + duplicateCount;
             
@@ -640,6 +641,7 @@ namespace IsoMesh
                 result.expandedNormals = new Vector3[expandedVertexCount];
                 result.expandedUVs = new Vector2[expandedVertexCount];
                 result.remappedTriangles = remappedTriangles;
+                result.duplicateSourceIndices = new int[duplicateCount];  // Store source indices
                 result.duplicateCount = duplicateCount;
                 result.needsMeshRebuild = true;
                 
@@ -677,7 +679,9 @@ namespace IsoMesh
                         duplicateDataFloats[baseIndex + 6],
                         duplicateDataFloats[baseIndex + 7]
                     );
-                    // sourceIndex at baseIndex + 8 (not needed for mesh creation)
+                    
+                    // Extract and store source index for vertex color mapping
+                    result.duplicateSourceIndices[i] = (int)duplicateDataFloats[baseIndex + 8];
                     // projection at baseIndex + 9 (not needed for mesh creation)
                 }
                 
@@ -883,8 +887,30 @@ namespace IsoMesh
                 AsyncGPUReadbackRequest colourRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayColours, m_meshVertexColoursBuffer, vertexRequestSize * sizeof(float) * 4, 0);
                 AsyncGPUReadbackRequest triangleRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayTriangles, m_meshTrianglesBuffer, triangleRequestSize * sizeof(int), 0);
 
+                // Check for initial errors
+                if (vertexRequest.hasError || normalRequest.hasError || colourRequest.hasError || triangleRequest.hasError)
+                {
+                    Debug.LogError("AsyncGPUReadbackRequest encountered an error during initialization.");
+                    yield break;
+                }
+
                 while (!vertexRequest.done && !normalRequest.done && !colourRequest.done && !triangleRequest.done)
                     yield return null;
+
+                // Check for errors after completion
+                if (vertexRequest.hasError || normalRequest.hasError || colourRequest.hasError || triangleRequest.hasError)
+                {
+                    Debug.LogError("AsyncGPUReadbackRequest encountered an error during execution.");
+                    yield break;
+                }
+
+                // Validate NativeArrays before use
+                if (!m_nativeArrayVertices.IsCreated || !m_nativeArrayNormals.IsCreated || 
+                    !m_nativeArrayColours.IsCreated || !m_nativeArrayTriangles.IsCreated)
+                {
+                    Debug.LogError("One or more NativeArrays are not properly created.");
+                    yield break;
+                }
 
                 SetMeshData(m_nativeArrayVertices, m_nativeArrayNormals, m_nativeArrayColours, m_nativeArrayTriangles, vertexCount, triangleCount);
             }
@@ -924,6 +950,7 @@ namespace IsoMesh
             m_mesh.SetNormals(normals, 0, vertexCount);
             
             // Generate UVs using second compute shader pass
+            Debug.Log($"🔧 [VERTEX COLOR DEBUG] UV Mode: {m_uvMode}, Debug Mode: {m_debugUVMode}");
             var uvResult = GenerateUVsComputeShader(vertices, normals, indices, vertexCount, triangleCount);
             
             // Now vertex colors are just material colors
@@ -932,7 +959,7 @@ namespace IsoMesh
             // Check if mesh rebuild is needed for seamless UVs
             if (uvResult.needsMeshRebuild)
             {
-                //Debug.LogWarning($"[UV] Mesh needs {uvResult.duplicateCount} duplicate vertices for seamless UVs. Full implementation pending.");
+                Debug.Log($"🔍 [VERTEX COLOR DEBUG] Seamless UV rebuild needed. Duplicates: {uvResult.duplicateCount}");
                 
                 // Step 7: Simple test case - double all vertices when debug mode = 3
                 if (m_debugUVMode == 3)
@@ -982,11 +1009,11 @@ namespace IsoMesh
                     return;
                 }
                 
-                // Implement full mesh rebuild with expanded vertices from seamless triplanar
+                                // Implement full mesh rebuild with expanded vertices from seamless triplanar
                 if (uvResult.expandedVertices != null && uvResult.expandedNormals != null && 
-                    uvResult.expandedUVs != null && uvResult.remappedTriangles != null)
+uvResult.expandedUVs != null && uvResult.remappedTriangles != null)
                 {
-                    //Debug.Log($"[UV] SEAMLESS MODE: Rebuilding mesh with {uvResult.expandedVertices.Length} vertices (expanded from {vertexCount})");
+                    Debug.Log($"🎯 [VERTEX COLOR DEBUG] SEAMLESS MODE: Rebuilding mesh with {uvResult.expandedVertices.Length} vertices (expanded from {vertexCount})");
                     
                     int expandedVertexCount = uvResult.expandedVertices.Length;
                     
@@ -997,14 +1024,25 @@ namespace IsoMesh
                     for (int i = 0; i < vertexCount; i++)
                     {
                         expandedColors[i] = colours[i];
+                        // Debug first few vertex colors
+                        if (i < 3)
+                            Debug.Log($"🎨 [SEAMLESS] Original vertex {i} color: {colours[i]}");
                     }
                     
                     // For duplicate vertices, use the same color as their source vertex
-                    // (We could enhance this to extract source index from GPU data if needed)
-                    for (int i = vertexCount; i < expandedVertexCount; i++)
+                    // Use the source indices stored during UV generation
+                    Debug.Log($"🔄 [SEAMLESS] Copying colors for {uvResult.duplicateCount} duplicate vertices");
+                    for (int i = 0; i < uvResult.duplicateCount; i++)
                     {
-                        // For now, use a default color or interpolate
-                        expandedColors[i] = Color.white;
+                        int destIndex = vertexCount + i;
+                        int sourceIndex = uvResult.duplicateSourceIndices[i];
+                        
+                        // Copy vertex color from the source vertex
+                        expandedColors[destIndex] = colours[sourceIndex];
+                        
+                        // Debug first few duplicates
+                        if (i < 3)
+                            Debug.Log($"🎨 [SEAMLESS] Duplicate vertex {destIndex} copied from {sourceIndex}: {colours[sourceIndex]}");
                     }
                     
                     // Set the expanded mesh data
@@ -1028,6 +1066,7 @@ namespace IsoMesh
             }
             
             // Fill vertex colors
+            Debug.Log($"🟢 [VERTEX COLOR DEBUG] REGULAR MODE: Setting {vertexCount} vertex colors (SDF material colors)");
             for (int i = 0; i < vertexCount; i++)
             {
                 cleanColors[i] = colours[i]; // Direct material colors
@@ -1035,6 +1074,10 @@ namespace IsoMesh
                 // DEBUG: Visualize UVs as colors
                 if (m_showUVDebug)
                     cleanColors[i] = new Color(uvResult.uvs[i].x, uvResult.uvs[i].y, 0, 1);
+                    
+                // Debug first few vertex colors
+                if (i < 3)
+                    Debug.Log($"🎨 Vertex {i} color: {colours[i]} -> {cleanColors[i]}");
             }
             
             m_mesh.SetUVs(0, uvResult.uvs, 0, vertexCount);
