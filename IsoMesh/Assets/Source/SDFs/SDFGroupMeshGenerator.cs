@@ -542,10 +542,10 @@ namespace IsoMesh
             int duplicateCount = totalDuplicates[0];
             
             // Debug logging
-            Debug.Log($"[UV] Seamless Triplanar Analysis:");
-            Debug.Log($"[UV] - Original vertices: {vertexCount}");
-            Debug.Log($"[UV] - Duplicates needed: {duplicateCount}");
-            Debug.Log($"[UV] - Total vertices after duplication: {vertexCount + duplicateCount}");
+            //Debug.Log($"[UV] Seamless Triplanar Analysis:");
+            //Debug.Log($"[UV] - Original vertices: {vertexCount}");
+            //Debug.Log($"[UV] - Duplicates needed: {duplicateCount}");
+            //Debug.Log($"[UV] - Total vertices after duplication: {vertexCount + duplicateCount}");
             
             // Store duplicate info in result
             result.duplicateCount = duplicateCount;
@@ -605,7 +605,7 @@ namespace IsoMesh
                 
                 // TODO: Update the actual mesh with new vertices and remapped triangles
                 // This would require modifying the mesh after UV generation
-                Debug.LogWarning($"Seamless triplanar created {duplicateCount} duplicate vertices for UV seams. Full mesh update not yet implemented.");
+                //Debug.LogWarning($"Seamless triplanar created {duplicateCount} duplicate vertices for UV seams. Full mesh update not yet implemented.");
             }
             
             // For now, just return the original vertex UVs
@@ -618,7 +618,7 @@ namespace IsoMesh
             // Step 5: If we have duplicates, read back and create expanded mesh data
             if (duplicateCount > 0)
             {
-                Debug.Log($"[UV] Reading expanded mesh data from GPU...");
+                //Debug.Log($"[UV] Reading expanded mesh data from GPU...");
                 
                 // Read original UVs
                 var originalUVs = new Vector2[vertexCount];
@@ -681,11 +681,11 @@ namespace IsoMesh
                     // projection at baseIndex + 9 (not needed for mesh creation)
                 }
                 
-                Debug.Log($"[UV] Seamless Triplanar Complete:");
-                Debug.Log($"[UV] - Original vertices: {vertexCount}");
-                Debug.Log($"[UV] - Duplicate vertices: {duplicateCount}");
-                Debug.Log($"[UV] - Total vertices: {expandedVertexCount}");
-                Debug.Log($"[UV] - Triangles: {triangleCount}");
+                //Debug.Log($"[UV] Seamless Triplanar Complete:");
+                //Debug.Log($"[UV] - Original vertices: {vertexCount}");
+                //Debug.Log($"[UV] - Duplicate vertices: {duplicateCount}");
+                //Debug.Log($"[UV] - Total vertices: {expandedVertexCount}");
+                //Debug.Log($"[UV] - Triangles: {triangleCount}");
             }
             
             // Cleanup
@@ -932,12 +932,12 @@ namespace IsoMesh
             // Check if mesh rebuild is needed for seamless UVs
             if (uvResult.needsMeshRebuild)
             {
-                Debug.LogWarning($"[UV] Mesh needs {uvResult.duplicateCount} duplicate vertices for seamless UVs. Full implementation pending.");
+                //Debug.LogWarning($"[UV] Mesh needs {uvResult.duplicateCount} duplicate vertices for seamless UVs. Full implementation pending.");
                 
                 // Step 7: Simple test case - double all vertices when debug mode = 3
                 if (m_debugUVMode == 3)
                 {
-                    Debug.Log($"[UV] TEST MODE: Doubling all vertices to test expanded mesh handling");
+                    //Debug.Log($"[UV] TEST MODE: Doubling all vertices to test expanded mesh handling");
                     
                     // Create expanded arrays with double the vertices
                     var testVertexCount = vertexCount * 2;
@@ -986,7 +986,7 @@ namespace IsoMesh
                 if (uvResult.expandedVertices != null && uvResult.expandedNormals != null && 
                     uvResult.expandedUVs != null && uvResult.remappedTriangles != null)
                 {
-                    Debug.Log($"[UV] SEAMLESS MODE: Rebuilding mesh with {uvResult.expandedVertices.Length} vertices (expanded from {vertexCount})");
+                    //Debug.Log($"[UV] SEAMLESS MODE: Rebuilding mesh with {uvResult.expandedVertices.Length} vertices (expanded from {vertexCount})");
                     
                     int expandedVertexCount = uvResult.expandedVertices.Length;
                     
@@ -1016,7 +1016,7 @@ namespace IsoMesh
                     // Use the remapped triangles
                     m_mesh.SetIndices(uvResult.remappedTriangles, MeshTopology.Triangles, 0, calculateBounds: true);
                     
-                    Debug.Log($"[UV] SEAMLESS MODE: Successfully created seamless mesh with {expandedVertexCount} vertices");
+                    //Debug.Log($"[UV] SEAMLESS MODE: Successfully created seamless mesh with {expandedVertexCount} vertices");
                     
                     // Cleanup and return early
                     uvResult.Dispose();
