@@ -1075,9 +1075,13 @@ uvResult.expandedUVs != null && uvResult.remappedTriangles != null)
                 if (m_showUVDebug)
                     cleanColors[i] = new Color(uvResult.uvs[i].x, uvResult.uvs[i].y, 0, 1);
                     
-                // Debug first few vertex colors
+                // Debug first few vertex colors - CHECK FOR NEIGHBOR DATA!
                 if (i < 3)
+                {
+                    Color c = colours[i];
+                    Debug.Log($"🎨 Vertex {i} RGBA: R={c.r:F3} G={c.g:F3} B={c.b:F3} A={c.a:F3}");
                     Debug.Log($"🎨 Vertex {i} color: {colours[i]} -> {cleanColors[i]}");
+                }
             }
             
             m_mesh.SetUVs(0, uvResult.uvs, 0, vertexCount);

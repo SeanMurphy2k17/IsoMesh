@@ -619,9 +619,27 @@ void Isosurface_BuildIndexBuffer(uint3 id : SV_DispatchThreadID)
     SDFMaterialGPU material_2 = _MeshVertexMaterials[index_2];
     SDFMaterialGPU material_3 = _MeshVertexMaterials[index_3];
     
-    _MeshVertexColours[index_1] = float4(material_1.Colour, material_1.Metallic);
-    _MeshVertexColours[index_2] = float4(material_2.Colour, material_2.Metallic);
-    _MeshVertexColours[index_3] = float4(material_3.Colour, material_3.Metallic);
+    // NEW: Store texture data with neighbor info!
+    // R = current vertex (same calc as before), GBA = neighbor R values
+    // TEMP DEBUG: Add obvious test pattern to verify data flow
+    _MeshVertexColours[index_1] = float4(
+        material_1.Colour.r,  // R: current vertex (same as before)
+        0.5,                  // G: TEST VALUE (should show in debug logs)
+        0.75,                 // B: TEST VALUE (should show in debug logs)
+        1.0                   // A: TEST VALUE (should show in debug logs)
+    );
+    _MeshVertexColours[index_2] = float4(
+        material_2.Colour.r,  // R: current vertex 
+        0.5,                  // G: TEST VALUE
+        0.75,                 // B: TEST VALUE
+        1.0                   // A: TEST VALUE
+    );
+    _MeshVertexColours[index_3] = float4(
+        material_3.Colour.r,  // R: current vertex
+        0.5,                  // G: TEST VALUE
+        0.75,                 // B: TEST VALUE
+        1.0                   // A: TEST VALUE
+    );
     
     InterlockedMax(INTERMEDIATE_VERTEX_COUNT_DIV_64, ceil(INTERMEDIATE_VERTEX_COUNT / 64.0));
 }
@@ -648,7 +666,13 @@ void Isosurface_AddIntermediateVerticesToIndexBuffer(uint3 id : SV_DispatchThrea
     _MeshNormals[index] = newVertex.Normal;
     //_MeshUVs[index] = uv;
     _MeshVertexMaterials[index] = material;
-    _MeshVertexColours[index] = float4(material.Colour, material.Metallic);
+    // For intermediate vertices, use same test pattern
+    _MeshVertexColours[index] = float4(
+        material.Colour.r,  // R: current vertex (same calc as before)
+        0.5,                // G: TEST VALUE
+        0.75,               // B: TEST VALUE  
+        1.0                 // A: TEST VALUE
+    );
     
     // doing this will mess with the vertex counts above in a race condition
     //InterlockedAdd(VERTEX_COUNT, 1);
