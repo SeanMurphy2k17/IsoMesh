@@ -137,44 +137,13 @@ void GenerateUVsTriplanar (uint3 id : SV_DispatchThreadID)
     // Normalize weights
     blendWeights = blendWeights / (blendWeights.x + blendWeights.y + blendWeights.z);
     
-    // Pick the dominant projection based on blend weights
-    float2 finalUV;
-    
-    // Simple winner-takes-all approach
-    if (blendWeights.x > blendWeights.y && blendWeights.x > blendWeights.z) {
-        // X-axis dominant (left/right faces)
-        finalUV = uvX;
-    } else if (blendWeights.y > blendWeights.z) {
-        // Y-axis dominant (top/bottom faces)
-        finalUV = uvY;
-    } else {
-        // Z-axis dominant (front/back faces)
-        finalUV = uvZ;
-    }
-    
-    if (_DebugMode == 1) {
-        // Debug visualization: Show which face was selected with distinct patterns
-        if (blendWeights.x > blendWeights.y && blendWeights.x > blendWeights.z) {
-            // X-facing (left/right) - horizontal stripes
-            _GeneratedUVs[id.x] = float2(0.5, frac(localVertex.y * 2.0));
-        } else if (blendWeights.y > blendWeights.z) {
-            // Y-facing (top/bottom) - grid pattern
-            _GeneratedUVs[id.x] = float2(frac(localVertex.x * 2.0), frac(localVertex.z * 2.0));
-        } else {
-            // Z-facing (front/back) - vertical stripes
-            _GeneratedUVs[id.x] = float2(frac(localVertex.x * 2.0), 0.5);
-        }
-    } else if (_DebugMode == 2) {
-        // Debug visualization: Show UV coordinates as colors
-        // This helps identify if UVs are in expected 0-1 range or if they're scaled wrong
-        _GeneratedUVs[id.x] = float2(frac(finalUV.x), frac(finalUV.y));
-    } else if (_DebugMode == 3) {
-        // Debug visualization: Show blend weights
-        _GeneratedUVs[id.x] = float2(blendWeights.y, max(blendWeights.x, blendWeights.z));
-    } else {
-        // Normal mode: Output the calculated UVs
-        _GeneratedUVs[id.x] = finalUV;
-    }
+        // Proper triplanar UV blending - no more hard projection switches!
+    // This eliminates seams by smoothly blending UV coordinates from all 3 projections
+    float2 finalUV = uvX * blendWeights.x + uvY * blendWeights.y + uvZ * blendWeights.z;
+      
+    // Output the actual blended UVs (not debug blend weights!)
+    _GeneratedUVs[id.x] = finalUV;
+  
 }
 
 // KERNEL 5: Spherical UV Generation (No Seams!)
