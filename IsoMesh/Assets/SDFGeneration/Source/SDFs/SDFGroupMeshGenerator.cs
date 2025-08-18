@@ -763,12 +763,25 @@ namespace IsoMesh
             if (!m_initialized || !Group.IsReady || Group.IsEmpty)
                 return;
 
+            // Rate limiting to prevent excessive updates
+            float currentTime = Time.time;
+            if (currentTime - m_lastUpdateTime < MIN_UPDATE_INTERVAL)
+                return;
+                
+            m_lastUpdateTime = currentTime;
+
             if (m_mainSettings.OutputMode == OutputMode.MeshFilter)
             {
                 if (m_mainSettings.IsAsynchronous)
                 {
-                    if (!m_isCoroutineRunning)
-                        StartCoroutine(Cr_GetMeshDataFromGPUAsync());
+                    // Cancel any existing async operation to prevent race conditions
+                    if (m_isCoroutineRunning)
+                    {
+                        // Don't start new operation while one is running - wait for next frame
+                        return;
+                    }
+                    
+                    StartCoroutine(Cr_GetMeshDataFromGPUAsync());
                 }
                 else
                 {
@@ -791,9 +804,10 @@ namespace IsoMesh
             {
                 if (array == null || !array.IsCreated || array.Length < count)
                 {
-                    if (array != null && array.IsCreated)
-                        array.Dispose();
-
+                    // NEVER dispose arrays - just create new generation and let Unity handle cleanup
+                    // AsyncGPUReadback marks arrays as "undisposable" while in use
+                    // Let Unity's garbage collection handle the old arrays when safe
+                    
                     array = new NativeArray<T>(count, Allocator.Persistent, NativeArrayOptions.ClearMemory);
                 }
             }
@@ -870,6 +884,8 @@ namespace IsoMesh
         }
 
         private bool m_isCoroutineRunning = false;
+        private float m_lastUpdateTime = 0f;
+        private const float MIN_UPDATE_INTERVAL = 0.1f; // Minimum 100ms between updates
 
         /// <summary>
         /// This is the asynchronous version of <see cref="GetMeshDataFromGPU"/>. Use it as a coroutine. It uses a member variable to prevent duplicates from running at the same time.
@@ -880,13 +896,42 @@ namespace IsoMesh
                 yield break;
 
             m_isCoroutineRunning = true;
+            
+            try
+            {
 
             Dispatch();
 
             if (m_outputCounterNativeArray == null || !m_outputCounterNativeArray.IsCreated)
                 m_outputCounterNativeArray = new NativeArray<int>(m_counterBuffer.count, Allocator.Persistent);
 
-            AsyncGPUReadbackRequest counterRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_outputCounterNativeArray, m_counterBuffer);
+            // Double-check array validity before async operation
+            if (!m_outputCounterNativeArray.IsCreated)
+            {
+                m_outputCounterNativeArray = new NativeArray<int>(m_counterBuffer.count, Allocator.Persistent);
+            }
+
+            AsyncGPUReadbackRequest counterRequest;
+            try
+            {
+                counterRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_outputCounterNativeArray, m_counterBuffer);
+            }
+            catch (System.InvalidOperationException)
+            {
+                // Array is in use by previous operation - create a new generation
+                // Don't try to dispose the old one, let Unity handle it when the async operation completes
+                m_outputCounterNativeArray = new NativeArray<int>(m_counterBuffer.count, Allocator.Persistent);
+                
+                try
+                {
+                    counterRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_outputCounterNativeArray, m_counterBuffer);
+                }
+                catch (System.InvalidOperationException)
+                {
+                    // Still failing - abort this generation attempt
+                    yield break;
+                }
+            }
 
             while (!counterRequest.done)
                 yield return null;
@@ -900,11 +945,45 @@ namespace IsoMesh
                 int vertexRequestSize = Mathf.Min(m_nativeArrayVertices.Length, m_meshVerticesBuffer.count, vertexCount);
                 int triangleRequestSize = Mathf.Min(m_nativeArrayTriangles.Length, m_meshTrianglesBuffer.count, triangleCount * 3);
 
-                AsyncGPUReadbackRequest vertexRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayVertices, m_meshVerticesBuffer, vertexRequestSize * sizeof(float) * 3, 0);
-                AsyncGPUReadbackRequest normalRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayNormals, m_meshNormalsBuffer, vertexRequestSize * sizeof(float) * 3, 0);
-                //AsyncGPUReadbackRequest uvRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayUVs, m_meshUVsBuffer, vertexRequestSize * sizeof(float) * 2, 0); // PACKED INTO VERTEX COLORS
-                AsyncGPUReadbackRequest colourRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayColours, m_meshVertexColoursBuffer, vertexRequestSize * sizeof(float) * 4, 0);
-                AsyncGPUReadbackRequest triangleRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayTriangles, m_meshTrianglesBuffer, triangleRequestSize * sizeof(int), 0);
+                // Validate all arrays before async readback (they may have been recreated by ReallocateNativeArrays)
+                if (!m_nativeArrayVertices.IsCreated || !m_nativeArrayNormals.IsCreated || 
+                    !m_nativeArrayColours.IsCreated || !m_nativeArrayTriangles.IsCreated)
+                {
+                    // Arrays not ready, skip this generation attempt
+                    yield break;
+                }
+
+                AsyncGPUReadbackRequest vertexRequest, normalRequest, colourRequest, triangleRequest;
+                try
+                {
+                    vertexRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayVertices, m_meshVerticesBuffer, vertexRequestSize * sizeof(float) * 3, 0);
+                    normalRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayNormals, m_meshNormalsBuffer, vertexRequestSize * sizeof(float) * 3, 0);
+                    //AsyncGPUReadbackRequest uvRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayUVs, m_meshUVsBuffer, vertexRequestSize * sizeof(float) * 2, 0); // PACKED INTO VERTEX COLORS
+                    colourRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayColours, m_meshVertexColoursBuffer, vertexRequestSize * sizeof(float) * 4, 0);
+                    triangleRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayTriangles, m_meshTrianglesBuffer, triangleRequestSize * sizeof(int), 0);
+                }
+                catch (System.InvalidOperationException)
+                {
+                    // Arrays in use by previous operation - create new generation without disposing old ones
+                    ReallocateNativeArrays(vertexCount, triangleCount, ref m_nativeArrayVertices, ref m_nativeArrayNormals, ref m_nativeArrayColours, ref m_nativeArrayTriangles);
+                    
+                    // Update request sizes for new arrays
+                    vertexRequestSize = Mathf.Min(m_nativeArrayVertices.Length, m_meshVerticesBuffer.count, vertexCount);
+                    triangleRequestSize = Mathf.Min(m_nativeArrayTriangles.Length, m_meshTrianglesBuffer.count, triangleCount * 3);
+                    
+                    try
+                    {
+                        vertexRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayVertices, m_meshVerticesBuffer, vertexRequestSize * sizeof(float) * 3, 0);
+                        normalRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayNormals, m_meshNormalsBuffer, vertexRequestSize * sizeof(float) * 3, 0);
+                        colourRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayColours, m_meshVertexColoursBuffer, vertexRequestSize * sizeof(float) * 4, 0);
+                        triangleRequest = AsyncGPUReadback.RequestIntoNativeArray(ref m_nativeArrayTriangles, m_meshTrianglesBuffer, triangleRequestSize * sizeof(int), 0);
+                    }
+                    catch (System.InvalidOperationException)
+                    {
+                        // Still failing - abort this generation attempt
+                        yield break;
+                    }
+                }
 
                 // Check for initial errors
                 if (vertexRequest.hasError || normalRequest.hasError || colourRequest.hasError || triangleRequest.hasError)
@@ -930,6 +1009,23 @@ namespace IsoMesh
                     //Debug.LogError("One or more NativeArrays are not properly created.");
                     yield break;
                 }
+                
+                // Additional validation: Check if arrays are still valid (not disposed)
+                try
+                {
+                    // Test access to validate arrays haven't been disposed
+                    if (m_nativeArrayVertices.Length == 0 || m_nativeArrayNormals.Length == 0 || 
+                        m_nativeArrayColours.Length == 0 || m_nativeArrayTriangles.Length == 0)
+                    {
+                        //Debug.LogWarning("NativeArrays have zero length, skipping mesh update.");
+                        yield break;
+                    }
+                }
+                catch (System.InvalidOperationException)
+                {
+                    //Debug.LogWarning("NativeArrays have been disposed during async operation, skipping mesh update.");
+                    yield break;
+                }
 
                 SetMeshData(m_nativeArrayVertices, m_nativeArrayNormals, m_nativeArrayColours, m_nativeArrayTriangles, vertexCount, triangleCount);
             }
@@ -942,7 +1038,12 @@ namespace IsoMesh
                     MeshCollider.enabled = false;
             }
 
-            m_isCoroutineRunning = false;
+            }
+            finally
+            {
+                // Always reset coroutine flag, even if operation was cancelled/failed
+                m_isCoroutineRunning = false;
+            }
         }
 
         private void SetMeshData(NativeArray<Vector3> vertices, NativeArray<Vector3> normals, NativeArray<Color> colours, NativeArray<int> indices, int vertexCount, int triangleCount)
@@ -965,8 +1066,23 @@ namespace IsoMesh
                 m_mesh.Clear();
             }
 
-            m_mesh.SetVertices(vertices, 0, vertexCount);
-            m_mesh.SetNormals(normals, 0, vertexCount);
+            // Final validation before setting mesh data
+            try
+            {
+                if (!vertices.IsCreated || !normals.IsCreated || !colours.IsCreated)
+                {
+                    Debug.LogWarning("Cannot set mesh data: NativeArrays not created");
+                    return;
+                }
+                
+                m_mesh.SetVertices(vertices, 0, vertexCount);
+                m_mesh.SetNormals(normals, 0, vertexCount);
+            }
+            catch (System.InvalidOperationException ex)
+            {
+                Debug.LogWarning($"Failed to set mesh data - arrays disposed during operation: {ex.Message}");
+                return;
+            }
 
             // Generate UVs using second compute shader pass
             //Debug.Log($"🔧 [VERTEX COLOR DEBUG] UV Mode: {m_uvMode}, Debug Mode: {m_debugUVMode}");

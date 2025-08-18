@@ -290,7 +290,15 @@ float sdf_with_noise(float3 p, SDFGPUData data, SDFMaterialGPU material)
     // Apply noise displacement if enabled
     if (material.UseNoise > 0 && material.NoiseAmplitude > 0.0)
     {
-        float noiseValue = fractalNoise3D(p, material.NoiseSeed, material.NoiseOctaves, material.NoiseFrequency);
+        // PERFECT FOR PREBAKED ROTATIONS: Pure world space noise
+        // This creates seamless noise across all tiles in a 500x500 grid
+        float3 noisePos = p; // Simple world position = continuous noise waves
+        
+        // ALTERNATIVE OPTIONS (if needed):
+        // Tiled/repeating every N units: fmod(p, 100.0)
+        // Different noise per tile: p + data.SomeUniqueOffset
+        
+        float noiseValue = fractalNoise3D(noisePos, material.NoiseSeed, material.NoiseOctaves, material.NoiseFrequency);
         noiseValue = (noiseValue - 0.5) * 2.0; // Remap to [-1,1]
         baseDist += noiseValue * material.NoiseAmplitude;
     }
