@@ -4,12 +4,13 @@ using UnityEngine;
 using UnityEditor;
 using System;
 using UnityEngine.Rendering;
+using UnityEngine.ProBuilder;
 
 namespace IsoMesh.Editor
 {
     public class MeshSDFGenerator : EditorWindow
     {
-        private const string ASSET_SAVE_PATH = "Assets/Data/SDFMeshes/";
+        private const string ASSET_SAVE_PATH = "Assets/SDFMeshes/";
 
         [SerializeField]
         [HideInInspector]
@@ -22,6 +23,9 @@ namespace IsoMesh.Editor
         [SerializeField]
         private Mesh m_mesh;
 
+        [SerializeField]
+        private ProBuilderMesh m_proBuilderMesh;
+
         private bool MissingMesh => m_mesh == null;
 
         [SerializeField]
@@ -29,7 +33,7 @@ namespace IsoMesh.Editor
         private int m_size = 128;
 
         [SerializeField]
-        private float m_padding = 0.2f;
+        private float m_padding = 1.0f;
 
         [SerializeField]
         private Vector3 m_translation = Vector3.zero;
@@ -67,6 +71,36 @@ namespace IsoMesh.Editor
         private Vector3 m_maxBounds;
 
         private bool CanSave => !MissingMesh && !m_samples.IsNullOrEmpty();
+
+        private bool ValidateMesh(Mesh mesh)
+        {
+            if (mesh == null)
+            {
+                Debug.LogError("Mesh is null!");
+                return false;
+            }
+
+            if (mesh.triangles == null || mesh.triangles.Length == 0)
+            {
+                Debug.LogError($"Mesh '{mesh.name}' has no triangles!");
+                return false;
+            }
+
+            if (mesh.vertices == null || mesh.vertices.Length == 0)
+            {
+                Debug.LogError($"Mesh '{mesh.name}' has no vertices!");
+                return false;
+            }
+
+            if (mesh.normals == null || mesh.normals.Length == 0)
+            {
+                Debug.LogWarning($"Mesh '{mesh.name}' has no normals - they will be recalculated.");
+                mesh.RecalculateNormals();
+            }
+
+            Debug.Log($"Mesh validation passed: {mesh.vertices.Length} vertices, {mesh.triangles.Length/3} triangles");
+            return true;
+        }
 
         private int m_lastSubdivisionLevel = 0;
 
@@ -146,12 +180,60 @@ namespace IsoMesh.Editor
 
                 if (m_mesh != newMesh)
                 {
+                    if (newMesh != null && !ValidateMesh(newMesh))
+                    {
+                        Debug.LogError($"Invalid mesh: {newMesh.name}");
+                        newMesh = null;
+                    }
+                    
                     m_mesh = newMesh;
 
                     if (m_inputMeshPreview != null)
                     {
                         DestroyImmediate(m_inputMeshPreview);
                         m_inputMeshPreview = null;
+                    }
+                }
+
+                // ProBuilder Mesh field
+                ProBuilderMesh newProBuilderMesh = (ProBuilderMesh)EditorGUILayout.ObjectField("ProBuilder Mesh", m_proBuilderMesh, typeof(ProBuilderMesh), allowSceneObjects: true);
+
+                if (m_proBuilderMesh != newProBuilderMesh)
+                {
+                    m_proBuilderMesh = newProBuilderMesh;
+
+                    if (m_proBuilderMesh != null)
+                    {
+                        // Refresh ProBuilder mesh to ensure it's up-to-date
+                        m_proBuilderMesh.ToMesh();
+                        
+                        // Get the generated mesh from MeshFilter
+                        MeshFilter meshFilter = m_proBuilderMesh.GetComponent<MeshFilter>();
+                        if (meshFilter != null)
+                        {
+                            m_mesh = meshFilter.sharedMesh;
+                            
+                            // Validate mesh has geometry
+                            if (ValidateMesh(m_mesh))
+                            {
+                                Debug.Log($"✓ Extracted mesh from ProBuilder: {m_proBuilderMesh.name} ({m_mesh.triangles.Length/3} triangles)");
+                            }
+                            else
+                            {
+                                Debug.LogError($"ProBuilder mesh {m_proBuilderMesh.name} is empty or invalid! Make sure the ProBuilder object has geometry.");
+                                m_mesh = null;
+                            }
+                        }
+                        else
+                        {
+                            Debug.LogError($"ProBuilder object {m_proBuilderMesh.name} is missing MeshFilter component!");
+                        }
+
+                        if (m_inputMeshPreview != null)
+                        {
+                            DestroyImmediate(m_inputMeshPreview);
+                            m_inputMeshPreview = null;
+                        }
                     }
                 }
 
@@ -163,8 +245,25 @@ namespace IsoMesh.Editor
                     m_inputMeshPreview.DrawPreview(GUILayoutUtility.GetRect(200, 200));
                 }
 
+                // Show ProBuilder status
+                if (m_proBuilderMesh != null)
+                {
+                    EditorGUILayout.HelpBox($"✓ Using ProBuilder mesh from: {m_proBuilderMesh.name}", MessageType.Info);
+                }
+
+                // Show mesh validation status
+                if (MissingMesh)
+                {
+                    EditorGUILayout.HelpBox("Please assign a Mesh or ProBuilder Mesh to continue.", MessageType.Warning);
+                }
+
                 m_size = Mathf.Max(1, EditorGUILayout.IntField("Size", m_size));
                 m_padding = Mathf.Max(0f, EditorGUILayout.FloatField("Padding", m_padding));
+                
+                if (m_padding < 0.5f)
+                {
+                    EditorGUILayout.HelpBox("⚠️ Low padding may cause mesh artifacts. Recommended: 1.0 or higher for complex meshes.", MessageType.Warning);
+                }
 
                 //this.DrawIntField("Size", ref m_size, min: 1);
                 ////this.DrawFloatField("Padding", ref m_padding, out _, min: 0f);
@@ -186,7 +285,7 @@ namespace IsoMesh.Editor
                 }
 
                 m_tesselateMesh = EditorGUILayout.Toggle("Tessellate Mesh First", m_tesselateMesh);
-                m_sampleUVs = EditorGUILayout.Toggle("Sample UVs", m_tesselateMesh);
+                m_sampleUVs = EditorGUILayout.Toggle("Sample UVs", m_sampleUVs);
 
                 if (m_tesselateMesh)
                 {

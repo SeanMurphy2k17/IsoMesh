@@ -8,8 +8,8 @@ using System.Globalization;
 using System;
 using System.Text;
 using System.Linq;
-using System.Reflection;
 using System.IO;
+using System.Reflection;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -132,9 +132,27 @@ public static class Utils
     public static T CreateAsset<T>(string path, string name = null) where T : ScriptableObject
     {
         T asset = ScriptableObject.CreateInstance<T>();
-        string assetPathAndName = AssetDatabase.GenerateUniqueAssetPath(path + name + ".asset");
+        
+        // Ensure the directory exists
+        if (!string.IsNullOrEmpty(path) && !Directory.Exists(path))
+        {
+            Directory.CreateDirectory(path);
+            AssetDatabase.Refresh();
+            Debug.Log($"Created directory: {path}");
+        }
+        
+        string fullPath = path + name + ".asset";
+        string assetPathAndName = AssetDatabase.GenerateUniqueAssetPath(fullPath);
 
-        Debug.Log(path + name + ".asset");
+        Debug.Log($"Attempting to create asset: {fullPath}");
+        Debug.Log($"Generated unique path: {assetPathAndName}");
+        
+        if (string.IsNullOrEmpty(assetPathAndName))
+        {
+            Debug.LogError($"Failed to generate unique asset path for: {fullPath}");
+            UnityEngine.Object.DestroyImmediate(asset);
+            return null;
+        }
         
         AssetDatabase.CreateAsset(asset, assetPathAndName);
 
